@@ -6,6 +6,13 @@
       "sector": "Tech",
       "shares": 20.0,
       "cost_basis": 25.0
+    },
+    {
+      "ticker": "LMT",
+      "category": "Defensive",
+      "sector": "Military",
+      "shares": 15.0,
+      "cost_basis": 50.0
     }
   ],
   "viewer": {

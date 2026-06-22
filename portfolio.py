@@ -2,16 +2,17 @@
 Stock Portfolio Tracker CLI (full-screen interactive TUI).
 
 Install:
-    pip install textual yfinance plotext
+    pip install textual yfinance
 
 Run:
-    python portfolio_tracker.py
+    python portfolio.py
 
 Key bindings:
     1 / 2 / 3     Switch tabs (Positions / Market Viewer / Allocation)
     r             Refresh data now
     q             Quit
     a             Add position (Positions tab)
+    up / down     Move selection between positions (Positions tab)
     e             Edit selected position (Positions tab)
     d             Delete selected position (Positions tab)
     s             Save holdings JSON (Positions tab)
@@ -22,8 +23,6 @@ Key bindings:
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
 import json
 import time
 from dataclasses import dataclass
@@ -33,6 +32,7 @@ from typing import Any, Optional
 
 import yfinance as yf
 from rich.columns import Columns
+from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -42,7 +42,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
-DATA_FILE = Path(__file__).with_name("portfolio.json")
+DATA_FILE = Path(__file__).with_name("portfolioData.json")
 CATEGORIES = ("Offensive", "Neutral", "Defensive")
 CATEGORY_COLORS = {
     "Offensive": "bold red",
@@ -226,64 +226,226 @@ def market_snapshot(symbol: str, timeframe: str) -> dict[str, Any]:
     }
 
 
-def build_chart(points: list[tuple[datetime, float]], timeframe: str, symbol: str, width: int, height: int) -> str:
-    if not points:
-        return "No chart data available for the selected timeframe."
+def format_axis_price(value: float) -> str:
+    abs_val = abs(value)
+    if abs_val >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if abs_val >= 10_000:
+        return f"${value / 1_000:.1f}K"
+    if abs_val >= 1_000:
+        return f"${value:,.0f}"
+    if abs_val >= 100:
+        return f"${value:.1f}"
+    return f"${value:.2f}"
 
-    try:
-        import plotext as plt
-    except Exception:
-        return "Install 'plotext' to render the terminal chart."
+
+def format_axis_time(dt: datetime, timeframe: str) -> str:
+    if timeframe in ("1D", "5D"):
+        return dt.strftime("%H:%M")
+    if timeframe in ("1M", "3M", "6M"):
+        return dt.strftime("%b %d")
+    return dt.strftime("%b '%y")
+
+
+BRAILLE_DOTS = {
+    (0, 0): 0x01,
+    (0, 1): 0x02,
+    (0, 2): 0x04,
+    (0, 3): 0x40,
+    (1, 0): 0x08,
+    (1, 1): 0x10,
+    (1, 2): 0x20,
+    (1, 3): 0x80,
+}
+
+
+class BrailleCanvas:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = max(1, width)
+        self.height = max(1, height)
+        self.cells = [[0 for _ in range(self.width)] for _ in range(self.height)]
+
+    def set_dot(self, x: int, y: int) -> None:
+        if x < 0 or y < 0:
+            return
+        char_x = x // 2
+        char_y = y // 4
+        if char_x >= self.width or char_y >= self.height:
+            return
+        self.cells[char_y][char_x] |= BRAILLE_DOTS[(x % 2, y % 4)]
+
+    def line(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        x, y = x0, y0
+        while True:
+            self.set_dot(x, y)
+            if x == x1 and y == y1:
+                break
+            err2 = 2 * err
+            if err2 >= dy:
+                err += dy
+                x += sx
+            if err2 <= dx:
+                err += dx
+                y += sy
+
+
+def resample_points(points: list[tuple[datetime, float]], target_count: int) -> list[tuple[datetime, float]]:
+    if len(points) <= target_count or target_count < 2:
+        return points
+    step = (len(points) - 1) / (target_count - 1)
+    sampled: list[tuple[datetime, float]] = []
+    for index in range(target_count):
+        sample_index = int(round(index * step))
+        sampled.append(points[sample_index])
+    return sampled
+
+
+def build_chart(
+    points: list[tuple[datetime, float]],
+    timeframe: str,
+    symbol: str,
+    width: int,
+    height: int,
+    prev_close: Optional[float] = None,
+) -> Group | Text:
+    if not points:
+        return Text("No chart data available for the selected timeframe.", style="dim")
 
     prices = [point[1] for point in points]
-    has_intraday = any(point[0].hour != 0 or point[0].minute != 0 for point in points)
-    date_form = "d/m/Y H:M" if has_intraday else "d/m/Y"
-    dates = [point[0].strftime("%d/%m/%Y %H:%M") if has_intraday else point[0].strftime("%d/%m/%Y") for point in points]
-    width = max(45, width)
-    height = max(12, height)
+    start_price = prices[0]
+    end_price = prices[-1]
+    is_profit = end_price >= start_price
+    line_style = "bold bright_green" if is_profit else "bold bright_red"
+    ref_style = "dim"
 
-    chart = ""
-    try:
-        plt.clear_figure()
-        plt.theme("pro")
-        plt.date_form(date_form)
-        plt.plotsize(width, height)
-        plt.plot(dates, prices, marker="dot", color="cyan")
-        plt.title(f"{symbol} ({timeframe})")
-        plt.xlabel("Date")
-        plt.ylabel("Price")
+    y_label_width = 9
+    plot_width = max(24, width - y_label_width - 2)
+    plot_height = max(8, height - 3)
 
-        built = plt.build()
-        if isinstance(built, str):
-            chart = built
-        elif built is not None:
-            chart = str(built)
-    except Exception:
-        # Fallback to numeric x-axis if string date parsing fails in plotext.
-        try:
-            plt.clear_figure()
-            plt.theme("pro")
-            plt.plotsize(width, height)
-            plt.plot(list(range(len(prices))), prices, marker="dot", color="cyan")
-            plt.title(f"{symbol} ({timeframe})")
-            plt.xlabel(f"Points ({dates[0]} -> {dates[-1]})")
-            plt.ylabel("Price")
-            built = plt.build()
-            if isinstance(built, str):
-                chart = built
-            elif built is not None:
-                chart = str(built)
-        except Exception:
-            chart = ""
+    price_min = min(prices)
+    price_max = max(prices)
+    if prev_close is not None:
+        price_min = min(price_min, prev_close)
+        price_max = max(price_max, prev_close)
 
-    if not chart.strip():
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            plt.show()
-        chart = buffer.getvalue()
+    padding = (price_max - price_min) * 0.06 or max(abs(end_price) * 0.02, 0.5)
+    price_min -= padding
+    price_max += padding
+    price_span = price_max - price_min or 1.0
 
-    plt.clear_figure()
-    return chart.strip() or "Chart could not be rendered."
+    dot_width = plot_width * 2
+    dot_height = plot_height * 4
+    sampled = resample_points(points, dot_width)
+
+    def price_to_y(price: float) -> int:
+        ratio = (price - price_min) / price_span
+        return int(round((1.0 - ratio) * (dot_height - 1)))
+
+    main_canvas = BrailleCanvas(plot_width, plot_height)
+    ref_canvas = BrailleCanvas(plot_width, plot_height)
+
+    if prev_close is not None and timeframe == "1D":
+        ref_y = price_to_y(prev_close)
+        for x in range(dot_width):
+            ref_canvas.set_dot(x, ref_y)
+
+    for index in range(1, len(sampled)):
+        x0 = index - 1
+        x1 = index
+        y0 = price_to_y(sampled[index - 1][1])
+        y1 = price_to_y(sampled[index][1])
+        main_canvas.line(x0, y0, x1, y1)
+
+    y_ticks = [price_max - (price_span * step / (plot_height - 1)) for step in range(plot_height)]
+    if plot_height == 1:
+        y_ticks = [price_max]
+
+    chart_rows: list[Text] = []
+    for row in range(plot_height):
+        label = format_axis_price(y_ticks[row]) if row < len(y_ticks) else ""
+        row_text = Text()
+        row_text.append(label.rjust(y_label_width), style="dim")
+        row_text.append("│", style="dim")
+        for col in range(plot_width):
+            main_bits = main_canvas.cells[row][col]
+            ref_bits = ref_canvas.cells[row][col]
+            if main_bits:
+                row_text.append(chr(0x2800 + main_bits), style=line_style)
+            elif ref_bits:
+                row_text.append(chr(0x2800 + ref_bits), style=ref_style)
+            else:
+                row_text.append(" ")
+        chart_rows.append(row_text)
+
+    x_labels = _chart_x_labels(sampled, timeframe, plot_width)
+    axis_line = Text()
+    axis_line.append(" " * y_label_width, style="dim")
+    axis_line.append("└", style="dim")
+    axis_line.append("─" * plot_width, style="dim")
+
+    label_line = Text()
+    label_line.append(" " * (y_label_width + 1), style="dim")
+    if x_labels:
+        buffer = [" "] * plot_width
+        if len(x_labels) == 1:
+            label = x_labels[0]
+            start = max(0, (plot_width - len(label)) // 2)
+            for index, character in enumerate(label):
+                if start + index < plot_width:
+                    buffer[start + index] = character
+        else:
+            for index, label in enumerate(x_labels):
+                start = int(round(index * (plot_width - len(label)) / (len(x_labels) - 1)))
+                for offset, character in enumerate(label):
+                    if start + offset < plot_width:
+                        buffer[start + offset] = character
+        label_line.append("".join(buffer), style="dim")
+
+    header_parts: list[tuple[str, str]] = [
+        (f" {symbol} ", "bold"),
+        (f" {timeframe} ", "dim"),
+        (format_money(start_price), "dim"),
+        (" -> ", "dim"),
+        (format_money(end_price), line_style),
+        (
+            f"  ({'+' if end_price >= start_price else ''}{format_money(end_price - start_price)}, "
+            f"{'+' if end_price >= start_price else ''}{format_percent(((end_price - start_price) / start_price) * 100 if start_price else 0.0)})",
+            line_style,
+        ),
+    ]
+    if prev_close is not None and timeframe == "1D":
+        header_parts.extend([("  prev ", "dim"), (format_money(prev_close), ref_style)])
+    header = Text.assemble(*header_parts)
+
+    return Group(
+        header,
+        Text("─" * (y_label_width + plot_width + 1), style="dim"),
+        *chart_rows,
+        axis_line,
+        label_line,
+    )
+
+
+def _chart_x_labels(
+    points: list[tuple[datetime, float]],
+    timeframe: str,
+    plot_width: int,
+) -> list[str]:
+    if not points:
+        return []
+    label_count = min(5, max(2, plot_width // 14))
+    if len(points) == 1:
+        return [format_axis_time(points[0][0], timeframe)]
+    labels: list[str] = []
+    for index in range(label_count):
+        point_index = int(round(index * (len(points) - 1) / (label_count - 1)))
+        labels.append(format_axis_time(points[point_index][0], timeframe))
+    return labels
 
 
 def alloc_bar(percent: float, width: int = 24) -> str:
@@ -424,6 +586,7 @@ class PortfolioTrackerApp(App[None]):
         Binding("d", "delete_position", "Delete"),
         Binding("s", "save_portfolio", "Save"),
         Binding("/", "focus_ticker", "Ticker"),
+        Binding("escape", "blur_input", "Unfocus", show=False),
         Binding("ctrl+1", "tf_1d", "TF:1D", show=False),
         Binding("ctrl+2", "tf_5d", "TF:5D", show=False),
         Binding("ctrl+3", "tf_1m", "TF:1M", show=False),
@@ -459,6 +622,7 @@ class PortfolioTrackerApp(App[None]):
     }
     #viewer_chart {
         height: 1fr;
+        padding: 0 1;
     }
     #allocation_view {
         height: 1fr;
@@ -473,6 +637,7 @@ class PortfolioTrackerApp(App[None]):
         self.viewer_ticker = "AAPL"
         self.viewer_timeframe = "1M"
         self.row_to_position: list[int] = []
+        self.selected_position_row = 0
         self.last_refresh_request = 0.0
         self.refresh_in_progress = False
         self.last_refresh_label = "Never"
@@ -511,6 +676,7 @@ class PortfolioTrackerApp(App[None]):
 
         self.set_interval(15.0, self._auto_refresh)
         self._trigger_refresh(force=True, reason="startup")
+        self.call_after_refresh(self._focus_positions_table)
 
     def _setup_positions_table(self) -> None:
         table = self.query_one("#positions_table", DataTable)
@@ -535,6 +701,19 @@ class PortfolioTrackerApp(App[None]):
 
     def action_tab_positions(self) -> None:
         self._set_tab("positions")
+        self.call_after_refresh(self._focus_positions_table)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.tab.id == "positions":
+            self.call_after_refresh(self._focus_positions_table)
+
+    def _focus_positions_table(self) -> None:
+        if self._active_tab() != "positions" or not self.positions:
+            return
+        table = self.query_one("#positions_table", DataTable)
+        row = max(0, min(self.selected_position_row, len(self.positions) - 1))
+        table.move_cursor(row=row)
+        table.focus()
 
     def action_tab_viewer(self) -> None:
         self._set_tab("viewer")
@@ -593,6 +772,9 @@ class PortfolioTrackerApp(App[None]):
 
     def _render_positions_table(self) -> None:
         table = self.query_one("#positions_table", DataTable)
+        had_focus = table.has_focus
+        if table.cursor_row is not None and 0 <= table.cursor_row < len(self.positions):
+            self.selected_position_row = table.cursor_row
         table.clear()
         self.row_to_position = []
 
@@ -666,6 +848,19 @@ class PortfolioTrackerApp(App[None]):
             (f"{self.last_refresh_label} (15s auto)", "dim"),
         )
         self.query_one("#positions_status", Static).update(summary)
+
+        if self.positions:
+            row = max(0, min(self.selected_position_row, len(self.positions) - 1))
+            self.selected_position_row = row
+            table.move_cursor(row=row)
+            if had_focus and self._active_tab() == "positions":
+                table.focus()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id != "positions_table":
+            return
+        if event.cursor_row is not None and event.cursor_row < len(self.row_to_position):
+            self.selected_position_row = event.cursor_row
 
     def _render_allocation_view(self) -> None:
         allocation_widget = self.query_one("#allocation_view", Static)
@@ -769,22 +964,25 @@ class PortfolioTrackerApp(App[None]):
         )
         summary_widget.update(Panel(details, title=f"Market Viewer - {self.viewer_ticker} ({self.viewer_timeframe})"))
 
-        width = max(50, chart_widget.size.width - 4)
-        height = max(14, chart_widget.size.height - 4)
-        chart_text = build_chart(
+        width = max(50, chart_widget.size.width - 6)
+        height = max(12, chart_widget.size.height - 2)
+        chart_renderable = build_chart(
             points=snapshot.get("chart_points", []),
             timeframe=self.viewer_timeframe,
             symbol=self.viewer_ticker,
             width=width,
             height=height,
+            prev_close=safe_float(snapshot.get("prev_close")) if self.viewer_timeframe == "1D" else None,
         )
-        chart_widget.update(Panel(Text(chart_text), title=f"{self.viewer_ticker} Price Chart"))
+        chart_widget.update(chart_renderable)
 
     def _selected_position_index(self) -> Optional[int]:
+        if not self.positions:
+            return None
         table = self.query_one("#positions_table", DataTable)
         cursor_row = table.cursor_row
         if cursor_row is None:
-            return None
+            cursor_row = self.selected_position_row
         if cursor_row < 0 or cursor_row >= len(self.row_to_position):
             return None
         return self.row_to_position[cursor_row]
@@ -833,8 +1031,14 @@ class PortfolioTrackerApp(App[None]):
             return
         ticker = self.positions[index].ticker
         self.positions.pop(index)
+        if self.positions:
+            self.selected_position_row = min(index, len(self.positions) - 1)
+        else:
+            self.selected_position_row = 0
         self._save_portfolio()
         self._render_positions_table()
+        if self.positions:
+            self.call_after_refresh(self._focus_positions_table)
         self._render_allocation_view()
         self.notify(f"Removed {ticker}")
 
@@ -915,6 +1119,11 @@ class PortfolioTrackerApp(App[None]):
         if self._active_tab() != "viewer":
             return
         self.query_one("#ticker_input", Input).focus()
+
+    def action_blur_input(self) -> None:
+        focused = self.focused
+        if isinstance(focused, Input):
+            self.set_focus(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "ticker_input":
