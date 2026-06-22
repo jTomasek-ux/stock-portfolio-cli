@@ -17,7 +17,8 @@ Key bindings:
     d             Delete selected position (Positions tab)
     s             Save holdings JSON (Positions tab)
     /             Focus ticker input (Market Viewer tab)
-    ctrl+1..ctrl+8  Market chart timeframes (1D,5D,1M,3M,6M,1Y,5Y,ALL)
+    Click 1D-ALL  Change chart timeframe (Market Viewer tab)
+    ctrl+1..ctrl+8  Chart timeframes shortcut (Market Viewer tab)
 """
 
 from __future__ import annotations
@@ -59,6 +60,11 @@ TIMEFRAME_MAP = {
     "5Y": ("5y", "1wk"),
     "ALL": ("max", "1wk"),
 }
+TIMEFRAME_OPTIONS = tuple(TIMEFRAME_MAP.keys())
+
+
+def timeframe_button_id(timeframe: str) -> str:
+    return f"tf_btn_{timeframe.lower()}"
 
 
 @dataclass
@@ -612,6 +618,14 @@ class PortfolioTrackerApp(App[None]):
         height: auto;
         margin: 0 0 1 0;
     }
+    #viewer_timeframes {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    #viewer_timeframes Button {
+        min-width: 5;
+        margin-right: 1;
+    }
     #ticker_input {
         width: 24;
         margin-right: 1;
@@ -653,6 +667,9 @@ class PortfolioTrackerApp(App[None]):
                     with Horizontal(id="viewer_top"):
                         yield Input(placeholder="Ticker and Enter", id="ticker_input")
                         yield Static("", id="viewer_summary")
+                    with Horizontal(id="viewer_timeframes"):
+                        for timeframe in TIMEFRAME_OPTIONS:
+                            yield Button(timeframe, id=timeframe_button_id(timeframe))
                     yield Static("", id="viewer_chart")
             with TabPane("Allocation", id="allocation"):
                 yield Static("", id="allocation_view")
@@ -672,6 +689,7 @@ class PortfolioTrackerApp(App[None]):
         self._setup_positions_table()
         self._render_positions_table()
         self._render_allocation_view()
+        self._update_timeframe_buttons()
         self._render_market_view()
 
         self.set_interval(15.0, self._auto_refresh)
@@ -958,10 +976,6 @@ class PortfolioTrackerApp(App[None]):
         else:
             details.add_row("52W Range", "N/A")
         details.add_row("Volume", f"{int(safe_float(snapshot.get('volume'))):,}" if snapshot.get("volume") else "N/A")
-        details.add_row(
-            "Timeframes",
-            "ctrl+1 1D | ctrl+2 5D | ctrl+3 1M | ctrl+4 3M | ctrl+5 6M | ctrl+6 1Y | ctrl+7 5Y | ctrl+8 ALL",
-        )
         summary_widget.update(Panel(details, title=f"Market Viewer - {self.viewer_ticker} ({self.viewer_timeframe})"))
 
         width = max(50, chart_widget.size.width - 6)
@@ -1136,9 +1150,30 @@ class PortfolioTrackerApp(App[None]):
         self._save_portfolio()
         self._trigger_refresh(force=True, reason="ticker update")
 
+    def _update_timeframe_buttons(self) -> None:
+        for timeframe in TIMEFRAME_OPTIONS:
+            button = self.query_one(f"#{timeframe_button_id(timeframe)}", Button)
+            button.variant = "primary" if timeframe == self.viewer_timeframe else "default"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if not button_id or not button_id.startswith("tf_btn_"):
+            return
+        timeframe = button_id.removeprefix("tf_btn_").upper()
+        if timeframe in TIMEFRAME_MAP:
+            self._set_timeframe(timeframe)
+
     def _set_timeframe(self, timeframe: str) -> None:
+        if self._active_tab() != "viewer":
+            return
+        if timeframe not in TIMEFRAME_MAP:
+            return
+        if timeframe == self.viewer_timeframe:
+            return
         self.viewer_timeframe = timeframe
+        self._update_timeframe_buttons()
         self._save_portfolio()
+        self.notify(f"Timeframe: {timeframe}")
         self._trigger_refresh(force=True, reason=f"timeframe {timeframe}")
 
     def action_tf_1d(self) -> None:
