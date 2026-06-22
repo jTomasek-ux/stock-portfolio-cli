@@ -1,0 +1,15 @@
+{
+  "positions": [
+    {
+      "ticker": "GOOG",
+      "category": "Offensive",
+      "sector": "Tech",
+      "shares": 20.0,
+      "cost_basis": 25.0
+    }
+  ],
+  "viewer": {
+    "ticker": "LMT",
+    "timeframe": "1M"
+  }
+}
