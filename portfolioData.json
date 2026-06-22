@@ -4,19 +4,12 @@
       "ticker": "GOOG",
       "category": "Offensive",
       "sector": "Tech",
-      "shares": 20.0,
-      "cost_basis": 25.0
-    },
-    {
-      "ticker": "LMT",
-      "category": "Defensive",
-      "sector": "Military",
-      "shares": 15.0,
-      "cost_basis": 50.0
+      "shares": 27.0,
+      "cost_basis": 367.18
     }
   ],
   "viewer": {
     "ticker": "LMT",
-    "timeframe": "3M"
+    "timeframe": "6M"
   }
 }

@@ -17,8 +17,9 @@ Key bindings:
     d             Delete selected position (Positions tab)
     s             Save holdings JSON (Positions tab)
     /             Focus ticker input (Market Viewer tab)
-    Click 1D-ALL      Change chart timeframe (Market Viewer tab)
-    shift+1..shift+8  Chart timeframes: 1D,5D,1M,3M,6M,1Y,5Y,ALL (Market Viewer tab)
+    Click 1D-ALL  Change chart timeframe (Market Viewer tab)
+    left / right  Previous / next timeframe (Market Viewer tab)
+    4 .. 0, -     Jump to timeframe (4=1D, 5=5D, 6=1M, 7=3M, 8=6M, 9=1Y, 0=5Y, -=ALL)
 """
 
 from __future__ import annotations
@@ -460,54 +461,91 @@ def alloc_bar(percent: float, width: int = 24) -> str:
     return ("#" * filled) + ("-" * (width - filled))
 
 
-class PositionEditorScreen(ModalScreen[Optional[dict[str, str]]]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("enter", "submit", "Submit")]
+class TerminalDialogScreen(ModalScreen):
+    """Base modal with dimmed backdrop and heavy ASCII-style border."""
 
-    CSS = """
-    PositionEditorScreen {
+    DEFAULT_CSS = """
+    TerminalDialogScreen {
         align: center middle;
     }
-    #position_form {
-        width: 70;
+    TerminalDialogScreen > .dialog_box {
+        width: 72;
         height: auto;
-        padding: 1 2;
-        border: solid $accent;
+        border: heavy $primary;
         background: $surface;
+        padding: 0 1 1 1;
     }
-    #position_form Input {
-        margin: 1 0;
-    }
-    #position_buttons {
+    TerminalDialogScreen .dialog_title {
         width: 100%;
+        text-align: center;
+        padding: 0 0 1 0;
+        text-style: bold;
+    }
+    TerminalDialogScreen .field_row {
         height: auto;
-        content-align: right middle;
-        margin-top: 1;
+        margin-bottom: 1;
+    }
+    TerminalDialogScreen .field_label {
+        width: 14;
+        content-align: left middle;
+        color: $text-muted;
+    }
+    TerminalDialogScreen .field_row Input {
+        width: 1fr;
+    }
+    TerminalDialogScreen .dialog_hint {
+        color: $text-muted;
+        text-style: dim;
+        padding-top: 1;
+        border-top: heavy $primary-darken-2;
+    }
+    TerminalDialogScreen .dialog_error {
+        color: $error;
+        height: auto;
+        min-height: 1;
     }
     """
+
+
+class PositionEditorScreen(TerminalDialogScreen):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("enter", "submit", "Save", show=False),
+    ]
+
+    FIELD_IDS = ("pos_ticker", "pos_category", "pos_sector", "pos_shares", "pos_cost_basis")
 
     def __init__(self, initial: Optional[Position] = None) -> None:
         super().__init__()
         self.initial = initial
 
     def compose(self) -> ComposeResult:
-        title = "Edit Position" if self.initial else "Add Position"
+        title = "edit position" if self.initial else "add position"
         ticker = self.initial.ticker if self.initial else ""
         category = self.initial.category if self.initial else "Neutral"
         sector = self.initial.sector if self.initial else ""
         shares = f"{self.initial.shares:.6f}".rstrip("0").rstrip(".") if self.initial else ""
         cost_basis = f"{self.initial.cost_basis:.4f}".rstrip("0").rstrip(".") if self.initial else ""
 
-        with Container(id="position_form"):
-            yield Static(f"[b]{title}[/b]")
-            yield Static("Category must be Offensive, Neutral, or Defensive.")
-            yield Input(value=ticker, id="pos_ticker", placeholder="Ticker (e.g. AAPL)")
-            yield Input(value=category, id="pos_category", placeholder="Category")
-            yield Input(value=sector, id="pos_sector", placeholder="Sector (optional)")
-            yield Input(value=shares, id="pos_shares", placeholder="Shares (e.g. 10.5)")
-            yield Input(value=cost_basis, id="pos_cost_basis", placeholder="Cost Basis per share (e.g. 180.25)")
-            with Horizontal(id="position_buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", variant="primary", id="save")
+        with Container(classes="dialog_box"):
+            yield Static(f"─ {title} ─", classes="dialog_title")
+            with Horizontal(classes="field_row"):
+                yield Static("ticker", classes="field_label")
+                yield Input(value=ticker, id="pos_ticker", placeholder="AAPL")
+            with Horizontal(classes="field_row"):
+                yield Static("category", classes="field_label")
+                yield Input(value=category, id="pos_category", placeholder="Offensive / Neutral / Defensive")
+            with Horizontal(classes="field_row"):
+                yield Static("sector", classes="field_label")
+                yield Input(value=sector, id="pos_sector", placeholder="optional")
+            with Horizontal(classes="field_row"):
+                yield Static("shares", classes="field_label")
+                yield Input(value=shares, id="pos_shares", placeholder="10.5")
+            with Horizontal(classes="field_row"):
+                yield Static("cost basis", classes="field_label")
+                yield Input(value=cost_basis, id="pos_cost_basis", placeholder="180.25")
+            yield Static("tab next field · enter save · esc cancel", classes="dialog_hint")
+            yield Static("", id="dialog_error", classes="dialog_error")
 
     def on_mount(self) -> None:
         self.query_one("#pos_ticker", Input).focus()
@@ -518,13 +556,40 @@ class PositionEditorScreen(ModalScreen[Optional[dict[str, str]]]):
     def action_submit(self) -> None:
         self._submit_form()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save":
-            self._submit_form()
-        else:
-            self.dismiss(None)
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id not in self.FIELD_IDS:
+            return
+        self._submit_form()
+
+    def _validate_form(self) -> str:
+        ticker = self.query_one("#pos_ticker", Input).value.strip().upper()
+        shares_raw = self.query_one("#pos_shares", Input).value.strip()
+        cost_basis_raw = self.query_one("#pos_cost_basis", Input).value.strip()
+
+        if not ticker:
+            return "ticker is required"
+        if not shares_raw:
+            return "shares are required"
+        if not cost_basis_raw:
+            return "cost basis is required"
+        try:
+            shares = float(shares_raw)
+            cost_basis = float(cost_basis_raw)
+        except ValueError:
+            return "shares and cost basis must be numbers"
+        if shares <= 0:
+            return "shares must be greater than zero"
+        if cost_basis < 0:
+            return "cost basis must be zero or greater"
+        return ""
 
     def _submit_form(self) -> None:
+        error = self._validate_form()
+        error_widget = self.query_one("#dialog_error", Static)
+        if error:
+            error_widget.update(error)
+            return
+        error_widget.update("")
         payload = {
             "ticker": self.query_one("#pos_ticker", Input).value.strip().upper(),
             "category": self.query_one("#pos_category", Input).value.strip(),
@@ -533,49 +598,6 @@ class PositionEditorScreen(ModalScreen[Optional[dict[str, str]]]):
             "cost_basis": self.query_one("#pos_cost_basis", Input).value.strip(),
         }
         self.dismiss(payload)
-
-
-class ConfirmDeleteScreen(ModalScreen[bool]):
-    BINDINGS = [Binding("y", "confirm", "Yes"), Binding("n", "cancel", "No"), Binding("escape", "cancel", "No")]
-
-    CSS = """
-    ConfirmDeleteScreen {
-        align: center middle;
-    }
-    #confirm_box {
-        width: 60;
-        height: auto;
-        padding: 1 2;
-        border: solid $error;
-        background: $surface;
-    }
-    #confirm_buttons {
-        width: 100%;
-        content-align: right middle;
-        margin-top: 1;
-    }
-    """
-
-    def __init__(self, ticker: str) -> None:
-        super().__init__()
-        self.ticker = ticker
-
-    def compose(self) -> ComposeResult:
-        with Container(id="confirm_box"):
-            yield Static(f"Delete position [b]{self.ticker}[/b]?")
-            yield Static("Press Y to confirm, N to cancel.")
-            with Horizontal(id="confirm_buttons"):
-                yield Button("No", id="cancel")
-                yield Button("Yes", id="confirm", variant="error")
-
-    def action_confirm(self) -> None:
-        self.dismiss(True)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "confirm")
 
 
 class PortfolioTrackerApp(App[None]):
@@ -590,20 +612,27 @@ class PortfolioTrackerApp(App[None]):
         Binding("a", "add_position", "Add"),
         Binding("e", "edit_position", "Edit"),
         Binding("d", "delete_position", "Delete"),
+        Binding("y", "status_prompt_y", "Yes", show=False),
+        Binding("n", "status_prompt_n", "No", show=False),
         Binding("s", "save_portfolio", "Save"),
         Binding("/", "focus_ticker", "Ticker"),
         Binding("escape", "blur_input", "Unfocus", show=False),
-        Binding("shift+1", "set_timeframe('1D')", "1D", show=False, priority=True),
-        Binding("shift+2", "set_timeframe('5D')", "5D", show=False, priority=True),
-        Binding("shift+3", "set_timeframe('1M')", "1M", show=False, priority=True),
-        Binding("shift+4", "set_timeframe('3M')", "3M", show=False, priority=True),
-        Binding("shift+5", "set_timeframe('6M')", "6M", show=False, priority=True),
-        Binding("shift+6", "set_timeframe('1Y')", "1Y", show=False, priority=True),
-        Binding("shift+7", "set_timeframe('5Y')", "5Y", show=False, priority=True),
-        Binding("shift+8", "set_timeframe('ALL')", "ALL", show=False, priority=True),
+        Binding("left", "tf_prev", "< TF", show=False),
+        Binding("right", "tf_next", "TF >", show=False),
+        Binding("4", "tf_1d", "1D", show=False),
+        Binding("5", "tf_5d", "5D", show=False),
+        Binding("6", "tf_1m", "1M", show=False),
+        Binding("7", "tf_3m", "3M", show=False),
+        Binding("8", "tf_6m", "6M", show=False),
+        Binding("9", "tf_1y", "1Y", show=False),
+        Binding("0", "tf_5y", "5Y", show=False),
+        Binding("-", "tf_all", "ALL", show=False),
     ]
 
     CSS = """
+    Header HeaderIcon {
+        display: none;
+    }
     #positions_status {
         height: auto;
         padding: 0 1;
@@ -641,6 +670,23 @@ class PortfolioTrackerApp(App[None]):
     #allocation_view {
         height: 1fr;
     }
+    #status_bar {
+        dock: bottom;
+        height: 1;
+        background: $surface-darken-1;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    #status_bar.prompt {
+        color: $warning;
+        text-style: bold;
+    }
+    #status_bar.error {
+        color: $error;
+    }
+    #status_bar.success {
+        color: $success;
+    }
     """
 
     def __init__(self) -> None:
@@ -655,6 +701,8 @@ class PortfolioTrackerApp(App[None]):
         self.last_refresh_request = 0.0
         self.refresh_in_progress = False
         self.last_refresh_label = "Never"
+        self.status_prompt: Optional[dict[str, Callable[[], None]]] = None
+        self._status_clear_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -673,7 +721,73 @@ class PortfolioTrackerApp(App[None]):
                     yield Static("", id="viewer_chart")
             with TabPane("Allocation", id="allocation"):
                 yield Static("", id="allocation_view")
+            with TabPane("Allocation", id="allocation"):
+                yield Static("", id="allocation_view")
+        yield Static("", id="status_bar")
         yield Footer()
+
+    def _cancel_status_timer(self) -> None:
+        if self._status_clear_timer is not None:
+            self._status_clear_timer.stop()
+            self._status_clear_timer = None
+
+    def clear_status(self) -> None:
+        if self.status_prompt:
+            return
+        bar = self.query_one("#status_bar", Static)
+        bar.update("")
+        bar.remove_class("prompt", "error", "success")
+        self._status_clear_timer = None
+
+    def show_status(self, message: str, level: str = "info", timeout: float = 4.0) -> None:
+        if self.status_prompt:
+            return
+        self._cancel_status_timer()
+        bar = self.query_one("#status_bar", Static)
+        bar.remove_class("prompt", "error", "success")
+        if level == "error":
+            bar.add_class("error")
+            text = f" ! {message}"
+        elif level == "success":
+            bar.add_class("success")
+            text = f" OK {message}"
+        else:
+            text = f" · {message}"
+        bar.update(text)
+        if timeout > 0:
+            self._status_clear_timer = self.set_timer(timeout, self.clear_status)
+
+    def begin_status_prompt(self, message: str, on_confirm: Callable[[], None]) -> None:
+        self._cancel_status_timer()
+        self.status_prompt = {"on_confirm": on_confirm}
+        bar = self.query_one("#status_bar", Static)
+        bar.remove_class("error", "success")
+        bar.add_class("prompt")
+        bar.update(f" {message} [y/N]")
+
+    def _cancel_status_prompt(self) -> None:
+        if not self.status_prompt:
+            return
+        self.status_prompt = None
+        self.clear_status()
+
+    def action_status_prompt_y(self) -> None:
+        if not self.status_prompt:
+            return
+        on_confirm = self.status_prompt["on_confirm"]
+        self.status_prompt = None
+        bar = self.query_one("#status_bar", Static)
+        bar.remove_class("prompt")
+        on_confirm()
+
+    def action_status_prompt_n(self) -> None:
+        self._cancel_status_prompt()
+
+    def _status_prompt_blocks(self, action: str) -> bool:
+        if not self.status_prompt:
+            return False
+        self.show_status(f"answer [y/N] or press n to cancel ({action})", timeout=2.0)
+        return True
 
     def on_mount(self) -> None:
         payload = load_data(DATA_FILE)
@@ -740,6 +854,8 @@ class PortfolioTrackerApp(App[None]):
         self._set_tab("allocation")
 
     def action_refresh_now(self) -> None:
+        if self._status_prompt_blocks("refresh"):
+            return
         self._trigger_refresh(force=False, reason="manual")
 
     def _auto_refresh(self) -> None:
@@ -748,10 +864,10 @@ class PortfolioTrackerApp(App[None]):
     def _trigger_refresh(self, force: bool, reason: str) -> None:
         now = time.monotonic()
         if not force and now - self.last_refresh_request < 1.5:
-            self.notify("Refresh ignored (debounced).")
+            self.show_status("refresh ignored (debounced)")
             return
         if self.refresh_in_progress:
-            self.notify("Refresh already running...")
+            self.show_status("refresh already running...")
             return
         self.last_refresh_request = now
         self.run_worker(self._refresh_data(reason), group="refresh-data", exclusive=True)
@@ -784,7 +900,7 @@ class PortfolioTrackerApp(App[None]):
             self.last_refresh_label = datetime.now().strftime("%H:%M:%S")
             self._render_positions_table()
         except Exception as exc:
-            self.notify(f"Refresh failed: {exc}", severity="error")
+            self.show_status(f"refresh failed: {exc}", level="error")
         finally:
             self.refresh_in_progress = False
 
@@ -1002,16 +1118,20 @@ class PortfolioTrackerApp(App[None]):
         return self.row_to_position[cursor_row]
 
     def action_add_position(self) -> None:
+        if self._status_prompt_blocks("add"):
+            return
         if self._active_tab() != "positions":
             return
         self.push_screen(PositionEditorScreen(), self._handle_add_result)
 
     def action_edit_position(self) -> None:
+        if self._status_prompt_blocks("edit"):
+            return
         if self._active_tab() != "positions":
             return
         position_index = self._selected_position_index()
         if position_index is None:
-            self.notify("Select a position to edit first.")
+            self.show_status("select a position to edit first", level="error")
             return
         self.push_screen(
             PositionEditorScreen(self.positions[position_index]),
@@ -1021,12 +1141,18 @@ class PortfolioTrackerApp(App[None]):
     def action_delete_position(self) -> None:
         if self._active_tab() != "positions":
             return
+        if self.status_prompt:
+            self.show_status("answer [y/N] or press n to cancel", timeout=2.0)
+            return
         position_index = self._selected_position_index()
         if position_index is None:
-            self.notify("Select a position to delete first.")
+            self.show_status("select a position to delete first", level="error")
             return
         ticker = self.positions[position_index].ticker
-        self.push_screen(ConfirmDeleteScreen(ticker), lambda confirmed: self._handle_delete_result(position_index, confirmed))
+        self.begin_status_prompt(
+            f"delete {ticker}?",
+            on_confirm=lambda idx=position_index: self._execute_delete(idx),
+        )
 
     def _handle_add_result(self, payload: Optional[dict[str, str]]) -> None:
         if payload is None:
@@ -1038,10 +1164,9 @@ class PortfolioTrackerApp(App[None]):
             return
         self.run_worker(self._upsert_position(payload, edit_index=index), group="position-upsert", exclusive=True)
 
-    def _handle_delete_result(self, index: int, confirmed: bool) -> None:
-        if not confirmed:
-            return
+    def _execute_delete(self, index: int) -> None:
         if index < 0 or index >= len(self.positions):
+            self.show_status("selection is no longer valid", level="error")
             return
         ticker = self.positions[index].ticker
         self.positions.pop(index)
@@ -1054,7 +1179,7 @@ class PortfolioTrackerApp(App[None]):
         if self.positions:
             self.call_after_refresh(self._focus_positions_table)
         self._render_allocation_view()
-        self.notify(f"Removed {ticker}")
+        self.show_status(f"removed {ticker}", level="success")
 
     async def _upsert_position(self, payload: dict[str, str], edit_index: Optional[int]) -> None:
         ticker = payload.get("ticker", "").strip().upper()
@@ -1064,32 +1189,32 @@ class PortfolioTrackerApp(App[None]):
         cost_basis_raw = payload.get("cost_basis", "").strip()
 
         if not ticker:
-            self.notify("Ticker is required.", severity="error")
+            self.show_status("ticker is required", level="error")
             return
         if not shares_raw:
-            self.notify("Shares are required.", severity="error")
+            self.show_status("shares are required", level="error")
             return
         if not cost_basis_raw:
-            self.notify("Cost basis is required.", severity="error")
+            self.show_status("cost basis is required", level="error")
             return
 
         try:
             shares = float(shares_raw)
             cost_basis = float(cost_basis_raw)
         except ValueError:
-            self.notify("Shares and cost basis must be numbers.", severity="error")
+            self.show_status("shares and cost basis must be numbers", level="error")
             return
 
         if shares <= 0:
-            self.notify("Shares must be greater than zero.", severity="error")
+            self.show_status("shares must be greater than zero", level="error")
             return
         if cost_basis < 0:
-            self.notify("Cost basis must be zero or greater.", severity="error")
+            self.show_status("cost basis must be zero or greater", level="error")
             return
 
         valid, sector_from_api, error_message = await asyncio.to_thread(validate_ticker, ticker)
         if not valid:
-            self.notify(error_message, severity="error")
+            self.show_status(error_message, level="error")
             return
 
         if not sector:
@@ -1104,13 +1229,13 @@ class PortfolioTrackerApp(App[None]):
         )
         if edit_index is None:
             self.positions.append(position)
-            self.notify(f"Added {ticker}")
+            self.show_status(f"added {ticker}", level="success")
         else:
             if 0 <= edit_index < len(self.positions):
                 self.positions[edit_index] = position
-                self.notify(f"Updated {ticker}")
+                self.show_status(f"updated {ticker}", level="success")
             else:
-                self.notify("Selection is no longer valid.", severity="error")
+                self.show_status("selection is no longer valid", level="error")
                 return
 
         self.positions.sort(key=lambda item: item.ticker)
@@ -1118,16 +1243,18 @@ class PortfolioTrackerApp(App[None]):
         self._trigger_refresh(force=True, reason="position change")
 
     def action_save_portfolio(self) -> None:
+        if self._status_prompt_blocks("save"):
+            return
         if self._active_tab() != "positions":
             return
         self._save_portfolio()
-        self.notify("Portfolio saved.")
+        self.show_status("portfolio saved", level="success")
 
     def _save_portfolio(self) -> None:
         try:
             save_data(DATA_FILE, self.positions, self.viewer_ticker, self.viewer_timeframe)
         except OSError as exc:
-            self.notify(f"Save failed: {exc}", severity="error")
+            self.show_status(f"save failed: {exc}", level="error")
 
     def action_focus_ticker(self) -> None:
         if self._active_tab() != "viewer":
@@ -1135,6 +1262,9 @@ class PortfolioTrackerApp(App[None]):
         self.query_one("#ticker_input", Input).focus()
 
     def action_blur_input(self) -> None:
+        if self.status_prompt:
+            self._cancel_status_prompt()
+            return
         focused = self.focused
         if isinstance(focused, Input):
             self.set_focus(None)
@@ -1142,13 +1272,20 @@ class PortfolioTrackerApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "ticker_input":
             return
+        if self._status_prompt_blocks("ticker"):
+            return
         symbol = event.value.strip().upper()
         if not symbol:
-            self.notify("Enter a ticker symbol first.")
+            self.show_status("enter a ticker symbol first", level="error")
             return
         self.viewer_ticker = symbol
         self._save_portfolio()
         self._trigger_refresh(force=True, reason="ticker update")
+
+    def _viewer_timeframe_keys_active(self) -> bool:
+        if self._active_tab() != "viewer":
+            return False
+        return not isinstance(self.focused, Input)
 
     def _update_timeframe_buttons(self) -> None:
         for timeframe in TIMEFRAME_OPTIONS:
@@ -1163,11 +1300,10 @@ class PortfolioTrackerApp(App[None]):
         if timeframe in TIMEFRAME_MAP:
             self._set_timeframe(timeframe)
 
-    def action_set_timeframe(self, timeframe: str) -> None:
-        self._set_timeframe(timeframe)
-
-    def _set_timeframe(self, timeframe: str) -> None:
+    def _set_timeframe(self, timeframe: str, *, from_keyboard: bool = False) -> None:
         if self._active_tab() != "viewer":
+            return
+        if from_keyboard and not self._viewer_timeframe_keys_active():
             return
         if timeframe not in TIMEFRAME_MAP:
             return
@@ -1176,8 +1312,44 @@ class PortfolioTrackerApp(App[None]):
         self.viewer_timeframe = timeframe
         self._update_timeframe_buttons()
         self._save_portfolio()
-        self.notify(f"Timeframe: {timeframe}")
+        self.show_status(f"timeframe: {timeframe}")
         self._trigger_refresh(force=True, reason=f"timeframe {timeframe}")
+
+    def action_tf_prev(self) -> None:
+        if not self._viewer_timeframe_keys_active():
+            return
+        index = TIMEFRAME_OPTIONS.index(self.viewer_timeframe)
+        self._set_timeframe(TIMEFRAME_OPTIONS[(index - 1) % len(TIMEFRAME_OPTIONS)])
+
+    def action_tf_next(self) -> None:
+        if not self._viewer_timeframe_keys_active():
+            return
+        index = TIMEFRAME_OPTIONS.index(self.viewer_timeframe)
+        self._set_timeframe(TIMEFRAME_OPTIONS[(index + 1) % len(TIMEFRAME_OPTIONS)])
+
+    def action_tf_1d(self) -> None:
+        self._set_timeframe("1D", from_keyboard=True)
+
+    def action_tf_5d(self) -> None:
+        self._set_timeframe("5D", from_keyboard=True)
+
+    def action_tf_1m(self) -> None:
+        self._set_timeframe("1M", from_keyboard=True)
+
+    def action_tf_3m(self) -> None:
+        self._set_timeframe("3M", from_keyboard=True)
+
+    def action_tf_6m(self) -> None:
+        self._set_timeframe("6M", from_keyboard=True)
+
+    def action_tf_1y(self) -> None:
+        self._set_timeframe("1Y", from_keyboard=True)
+
+    def action_tf_5y(self) -> None:
+        self._set_timeframe("5Y", from_keyboard=True)
+
+    def action_tf_all(self) -> None:
+        self._set_timeframe("ALL", from_keyboard=True)
 
 
 if __name__ == "__main__":
