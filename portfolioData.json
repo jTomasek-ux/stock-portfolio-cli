@@ -17,6 +17,6 @@
   ],
   "viewer": {
     "ticker": "LMT",
-    "timeframe": "5Y"
+    "timeframe": "3M"
   }
 }

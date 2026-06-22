@@ -17,8 +17,8 @@ Key bindings:
     d             Delete selected position (Positions tab)
     s             Save holdings JSON (Positions tab)
     /             Focus ticker input (Market Viewer tab)
-    Click 1D-ALL  Change chart timeframe (Market Viewer tab)
-    ctrl+1..ctrl+8  Chart timeframes shortcut (Market Viewer tab)
+    Click 1D-ALL      Change chart timeframe (Market Viewer tab)
+    shift+1..shift+8  Chart timeframes: 1D,5D,1M,3M,6M,1Y,5Y,ALL (Market Viewer tab)
 """
 
 from __future__ import annotations
@@ -593,14 +593,14 @@ class PortfolioTrackerApp(App[None]):
         Binding("s", "save_portfolio", "Save"),
         Binding("/", "focus_ticker", "Ticker"),
         Binding("escape", "blur_input", "Unfocus", show=False),
-        Binding("ctrl+1", "tf_1d", "TF:1D", show=False),
-        Binding("ctrl+2", "tf_5d", "TF:5D", show=False),
-        Binding("ctrl+3", "tf_1m", "TF:1M", show=False),
-        Binding("ctrl+4", "tf_3m", "TF:3M", show=False),
-        Binding("ctrl+5", "tf_6m", "TF:6M", show=False),
-        Binding("ctrl+6", "tf_1y", "TF:1Y", show=False),
-        Binding("ctrl+7", "tf_5y", "TF:5Y", show=False),
-        Binding("ctrl+8", "tf_all", "TF:ALL", show=False),
+        Binding("shift+1", "set_timeframe('1D')", "1D", show=False, priority=True),
+        Binding("shift+2", "set_timeframe('5D')", "5D", show=False, priority=True),
+        Binding("shift+3", "set_timeframe('1M')", "1M", show=False, priority=True),
+        Binding("shift+4", "set_timeframe('3M')", "3M", show=False, priority=True),
+        Binding("shift+5", "set_timeframe('6M')", "6M", show=False, priority=True),
+        Binding("shift+6", "set_timeframe('1Y')", "1Y", show=False, priority=True),
+        Binding("shift+7", "set_timeframe('5Y')", "5Y", show=False, priority=True),
+        Binding("shift+8", "set_timeframe('ALL')", "ALL", show=False, priority=True),
     ]
 
     CSS = """
@@ -1163,6 +1163,9 @@ class PortfolioTrackerApp(App[None]):
         if timeframe in TIMEFRAME_MAP:
             self._set_timeframe(timeframe)
 
+    def action_set_timeframe(self, timeframe: str) -> None:
+        self._set_timeframe(timeframe)
+
     def _set_timeframe(self, timeframe: str) -> None:
         if self._active_tab() != "viewer":
             return
@@ -1175,30 +1178,6 @@ class PortfolioTrackerApp(App[None]):
         self._save_portfolio()
         self.notify(f"Timeframe: {timeframe}")
         self._trigger_refresh(force=True, reason=f"timeframe {timeframe}")
-
-    def action_tf_1d(self) -> None:
-        self._set_timeframe("1D")
-
-    def action_tf_5d(self) -> None:
-        self._set_timeframe("5D")
-
-    def action_tf_1m(self) -> None:
-        self._set_timeframe("1M")
-
-    def action_tf_3m(self) -> None:
-        self._set_timeframe("3M")
-
-    def action_tf_6m(self) -> None:
-        self._set_timeframe("6M")
-
-    def action_tf_1y(self) -> None:
-        self._set_timeframe("1Y")
-
-    def action_tf_5y(self) -> None:
-        self._set_timeframe("5Y")
-
-    def action_tf_all(self) -> None:
-        self._set_timeframe("ALL")
 
 
 if __name__ == "__main__":
