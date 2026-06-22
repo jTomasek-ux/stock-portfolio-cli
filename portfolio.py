@@ -721,8 +721,6 @@ class PortfolioTrackerApp(App[None]):
                     yield Static("", id="viewer_chart")
             with TabPane("Allocation", id="allocation"):
                 yield Static("", id="allocation_view")
-            with TabPane("Allocation", id="allocation"):
-                yield Static("", id="allocation_view")
         yield Static("", id="status_bar")
         yield Footer()
 

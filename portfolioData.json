@@ -9,7 +9,7 @@
     }
   ],
   "viewer": {
-    "ticker": "LMT",
-    "timeframe": "6M"
+    "ticker": "GOOG",
+    "timeframe": "5Y"
   }
 }
