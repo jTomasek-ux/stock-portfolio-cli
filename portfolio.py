@@ -16,6 +16,7 @@ Key bindings:
     e             Edit selected position (Positions tab)
     d             Delete selected position (Positions tab)
     s             Save portfolio JSON (Positions or Notes tab)
+    Notes tab     Markdown highlighting (# headings, - bullets, **bold**)
     /             Focus ticker input (Market Viewer tab)
     Click 1D-ALL  Change chart timeframe (Market Viewer tab)
     left / right  Previous / next timeframe (Market Viewer tab)
@@ -56,6 +57,7 @@ from textual.widgets import (
     TabPane,
     TextArea,
 )
+from textual.widgets.text_area import TextAreaTheme
 
 DATA_FILE = Path(__file__).with_name("portfolioData.json")
 GLOBAL_NOTE_KEY = "global"
@@ -76,6 +78,13 @@ TIMEFRAME_MAP = {
     "ALL": ("max", "1wk"),
 }
 TIMEFRAME_OPTIONS = tuple(TIMEFRAME_MAP.keys())
+NOTES_EDITOR_LANGUAGE = "markdown"
+NOTES_EDITOR_THEME = "default"
+
+
+def build_notes_default_theme() -> TextAreaTheme:
+    """Plain notes theme: inherits app colors, no syntax rainbow."""
+    return TextAreaTheme(name="default", syntax_styles={})
 
 
 def timeframe_button_id(timeframe: str) -> str:
@@ -723,6 +732,10 @@ class PortfolioTrackerApp(App[None]):
     #notes_editor {
         width: 1fr;
         height: 1fr;
+        border: solid $primary-darken-2;
+    }
+    #notes_editor:focus {
+        border: solid $accent;
     }
     #notes_status {
         height: auto;
@@ -789,7 +802,15 @@ class PortfolioTrackerApp(App[None]):
                 with Vertical(id="notes_container"):
                     with Horizontal():
                         yield ListView(id="notes_list")
-                        yield TextArea(id="notes_editor")
+                        yield TextArea(
+                            id="notes_editor",
+                            language=NOTES_EDITOR_LANGUAGE,
+                            theme="css",
+                            soft_wrap=True,
+                            show_line_numbers=True,
+                            highlight_cursor_line=True,
+                            tab_behavior="indent",
+                        )
                     yield Static("", id="notes_status")
         yield Static("", id="status_bar")
         yield Footer()
@@ -875,6 +896,7 @@ class PortfolioTrackerApp(App[None]):
         self._update_timeframe_buttons()
         self._render_market_view()
         self._populate_notes_list()
+        self._configure_notes_editor()
         self._load_note_into_editor()
 
         self.set_interval(15.0, self._auto_refresh)
@@ -915,8 +937,22 @@ class PortfolioTrackerApp(App[None]):
             self._populate_notes_list()
             self.call_after_refresh(self._focus_notes_list)
 
+    def _configure_notes_editor(self) -> None:
+        editor = self.query_one("#notes_editor", TextArea)
+        editor.register_theme(build_notes_default_theme())
+        editor.theme = NOTES_EDITOR_THEME
+
     def _note_label(self, note_key: str) -> str:
         return "Global Journal" if note_key == GLOBAL_NOTE_KEY else note_key
+
+    def _note_list_markup(self, note_key: str) -> str:
+        if note_key == GLOBAL_NOTE_KEY:
+            return "[bold cyan]Global Journal[/]"
+        position = next((item for item in self.positions if item.ticker == note_key), None)
+        if position:
+            style = CATEGORY_COLORS.get(normalize_category(position.category), "white")
+            return f"[{style}]{note_key}[/]"
+        return f"[dim]{note_key}[/]"
 
     def _note_keys(self) -> list[str]:
         tickers = sorted({position.ticker for position in self.positions if position.ticker})
@@ -928,7 +964,7 @@ class PortfolioTrackerApp(App[None]):
         list_view.clear()
         self._note_list_keys = self._note_keys()
         for note_key in self._note_list_keys:
-            list_view.append(ListItem(Label(self._note_label(note_key))))
+            list_view.append(ListItem(Label(self._note_list_markup(note_key))))
         if self.active_note_key not in self._note_list_keys:
             self.active_note_key = GLOBAL_NOTE_KEY
         if self._note_list_keys:
@@ -943,7 +979,9 @@ class PortfolioTrackerApp(App[None]):
     def _render_notes_status(self) -> None:
         status = self.query_one("#notes_status", Static)
         label = self._note_label(self.active_note_key)
-        status.update(f"Editing: {label}  |  auto-saves on switch  |  press s to save")
+        status.update(
+            f"Editing: {label}  |  theme: {NOTES_EDITOR_THEME}  |  markdown: # heading, - bullet, **bold**  |  s to save"
+        )
 
     def _save_active_note(self, *, persist: bool = False) -> None:
         if not self.active_note_key:
