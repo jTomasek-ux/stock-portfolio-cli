@@ -8,18 +8,18 @@ Run:
     python portfolio.py
 
 Key bindings:
-    1 / 2 / 3     Switch tabs (Positions / Market Viewer / Allocation)
+    1 / 2 / 3 / 4  Switch tabs (Positions / Market Viewer / Allocation / Notes)
     r             Refresh data now
     q             Quit
     a             Add position (Positions tab)
     up / down     Move selection between positions (Positions tab)
     e             Edit selected position (Positions tab)
     d             Delete selected position (Positions tab)
-    s             Save holdings JSON (Positions tab)
+    s             Save portfolio JSON (Positions or Notes tab)
     /             Focus ticker input (Market Viewer tab)
     Click 1D-ALL  Change chart timeframe (Market Viewer tab)
     left / right  Previous / next timeframe (Market Viewer tab)
-    4 .. 0, -     Jump to timeframe (4=1D, 5=5D, 6=1M, 7=3M, 8=6M, 9=1Y, 0=5Y, -=ALL)
+    d, 5 .. 0, -  Jump to timeframe (d=1D, 5=5D, 6=1M, 7=3M, 8=6M, 9=1Y, 0=5Y, -=ALL)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yfinance as yf
 from rich.columns import Columns
@@ -42,9 +42,23 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+    TabbedContent,
+    TabPane,
+    TextArea,
+)
 
 DATA_FILE = Path(__file__).with_name("portfolioData.json")
+GLOBAL_NOTE_KEY = "global"
 CATEGORIES = ("Offensive", "Neutral", "Defensive")
 CATEGORY_COLORS = {
     "Offensive": "bold red",
@@ -129,7 +143,24 @@ def default_data() -> dict[str, Any]:
             "ticker": "AAPL",
             "timeframe": "1M",
         },
+        "notes": {
+            GLOBAL_NOTE_KEY: "",
+        },
     }
+
+
+def normalize_notes(raw: Any) -> dict[str, str]:
+    notes: dict[str, str] = {GLOBAL_NOTE_KEY: ""}
+    if not isinstance(raw, dict):
+        return notes
+    for key, value in raw.items():
+        normalized_key = (
+            GLOBAL_NOTE_KEY if str(key).strip().lower() == GLOBAL_NOTE_KEY else str(key).strip().upper()
+        )
+        if normalized_key:
+            notes[normalized_key] = str(value) if value is not None else ""
+    notes.setdefault(GLOBAL_NOTE_KEY, "")
+    return notes
 
 
 def load_data(path: Path) -> dict[str, Any]:
@@ -143,15 +174,24 @@ def load_data(path: Path) -> dict[str, Any]:
         payload = default_data()
     payload.setdefault("positions", [])
     payload.setdefault("viewer", {})
+    payload.setdefault("notes", {GLOBAL_NOTE_KEY: ""})
     payload["viewer"].setdefault("ticker", "AAPL")
     payload["viewer"].setdefault("timeframe", "1M")
+    payload["notes"] = normalize_notes(payload["notes"])
     return payload
 
 
-def save_data(path: Path, positions: list[Position], viewer_ticker: str, viewer_timeframe: str) -> None:
+def save_data(
+    path: Path,
+    positions: list[Position],
+    viewer_ticker: str,
+    viewer_timeframe: str,
+    notes: dict[str, str],
+) -> None:
     payload = {
         "positions": [position.to_dict() for position in positions],
         "viewer": {"ticker": viewer_ticker, "timeframe": viewer_timeframe},
+        "notes": normalize_notes(notes),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -607,6 +647,7 @@ class PortfolioTrackerApp(App[None]):
         Binding("1", "tab_positions", "Positions", priority=True),
         Binding("2", "tab_viewer", "Market", priority=True),
         Binding("3", "tab_allocation", "Allocation", priority=True),
+        Binding("4", "tab_notes", "Notes", priority=True),
         Binding("r", "refresh_now", "Refresh"),
         Binding("q", "quit", "Quit"),
         Binding("a", "add_position", "Add"),
@@ -619,7 +660,7 @@ class PortfolioTrackerApp(App[None]):
         Binding("escape", "blur_input", "Unfocus", show=False),
         Binding("left", "tf_prev", "< TF", show=False),
         Binding("right", "tf_next", "TF >", show=False),
-        Binding("4", "tf_1d", "1D", show=False),
+        Binding("d", "tf_1d", "1D", show=False),
         Binding("5", "tf_5d", "5D", show=False),
         Binding("6", "tf_1m", "1M", show=False),
         Binding("7", "tf_3m", "3M", show=False),
@@ -670,6 +711,25 @@ class PortfolioTrackerApp(App[None]):
     #allocation_view {
         height: 1fr;
     }
+    #notes_container {
+        height: 1fr;
+    }
+    #notes_list {
+        width: 22;
+        height: 1fr;
+        border: solid $primary-darken-2;
+        margin-right: 1;
+    }
+    #notes_editor {
+        width: 1fr;
+        height: 1fr;
+    }
+    #notes_status {
+        height: auto;
+        padding: 0 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
     #status_bar {
         dock: bottom;
         height: 1;
@@ -703,6 +763,10 @@ class PortfolioTrackerApp(App[None]):
         self.last_refresh_label = "Never"
         self.status_prompt: Optional[dict[str, Callable[[], None]]] = None
         self._status_clear_timer = None
+        self.notes: dict[str, str] = {GLOBAL_NOTE_KEY: ""}
+        self.active_note_key = GLOBAL_NOTE_KEY
+        self._note_list_keys: list[str] = []
+        self._notes_save_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -721,6 +785,12 @@ class PortfolioTrackerApp(App[None]):
                     yield Static("", id="viewer_chart")
             with TabPane("Allocation", id="allocation"):
                 yield Static("", id="allocation_view")
+            with TabPane("Notes", id="notes"):
+                with Vertical(id="notes_container"):
+                    with Horizontal():
+                        yield ListView(id="notes_list")
+                        yield TextArea(id="notes_editor")
+                    yield Static("", id="notes_status")
         yield Static("", id="status_bar")
         yield Footer()
 
@@ -794,6 +864,7 @@ class PortfolioTrackerApp(App[None]):
         self.viewer_timeframe = str(payload.get("viewer", {}).get("timeframe", "1M")).upper()
         if self.viewer_timeframe not in TIMEFRAME_MAP:
             self.viewer_timeframe = "1M"
+        self.notes = normalize_notes(payload.get("notes"))
 
         ticker_input = self.query_one("#ticker_input", Input)
         ticker_input.value = self.viewer_ticker
@@ -803,6 +874,8 @@ class PortfolioTrackerApp(App[None]):
         self._render_allocation_view()
         self._update_timeframe_buttons()
         self._render_market_view()
+        self._populate_notes_list()
+        self._load_note_into_editor()
 
         self.set_interval(15.0, self._auto_refresh)
         self._trigger_refresh(force=True, reason="startup")
@@ -827,6 +900,8 @@ class PortfolioTrackerApp(App[None]):
         return tabs.active
 
     def _set_tab(self, tab_id: str) -> None:
+        if self._active_tab() == "notes" and tab_id != "notes":
+            self._save_active_note(persist=True)
         self.query_one("#tabs", TabbedContent).active = tab_id
 
     def action_tab_positions(self) -> None:
@@ -836,6 +911,81 @@ class PortfolioTrackerApp(App[None]):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.tab.id == "positions":
             self.call_after_refresh(self._focus_positions_table)
+        elif event.tab.id == "notes":
+            self._populate_notes_list()
+            self.call_after_refresh(self._focus_notes_list)
+
+    def _note_label(self, note_key: str) -> str:
+        return "Global Journal" if note_key == GLOBAL_NOTE_KEY else note_key
+
+    def _note_keys(self) -> list[str]:
+        tickers = sorted({position.ticker for position in self.positions if position.ticker})
+        orphans = sorted(key for key in self.notes if key != GLOBAL_NOTE_KEY and key not in tickers)
+        return [GLOBAL_NOTE_KEY, *tickers, *orphans]
+
+    def _populate_notes_list(self) -> None:
+        list_view = self.query_one("#notes_list", ListView)
+        list_view.clear()
+        self._note_list_keys = self._note_keys()
+        for note_key in self._note_list_keys:
+            list_view.append(ListItem(Label(self._note_label(note_key))))
+        if self.active_note_key not in self._note_list_keys:
+            self.active_note_key = GLOBAL_NOTE_KEY
+        if self._note_list_keys:
+            list_view.index = self._note_list_keys.index(self.active_note_key)
+        self._render_notes_status()
+
+    def _load_note_into_editor(self) -> None:
+        editor = self.query_one("#notes_editor", TextArea)
+        editor.load_text(self.notes.get(self.active_note_key, ""))
+        self._render_notes_status()
+
+    def _render_notes_status(self) -> None:
+        status = self.query_one("#notes_status", Static)
+        label = self._note_label(self.active_note_key)
+        status.update(f"Editing: {label}  |  auto-saves on switch  |  press s to save")
+
+    def _save_active_note(self, *, persist: bool = False) -> None:
+        if not self.active_note_key:
+            return
+        editor = self.query_one("#notes_editor", TextArea)
+        self.notes[self.active_note_key] = editor.text
+        if persist:
+            self._save_portfolio()
+
+    def _select_note(self, note_key: str, *, focus_editor: bool = False) -> None:
+        if note_key not in self._note_list_keys:
+            return
+        if note_key != self.active_note_key:
+            self._save_active_note(persist=True)
+            self.active_note_key = note_key
+            self._load_note_into_editor()
+        if focus_editor:
+            self.query_one("#notes_editor", TextArea).focus()
+
+    def _focus_notes_list(self) -> None:
+        if self._active_tab() != "notes":
+            return
+        self.query_one("#notes_list", ListView).focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id != "notes_list":
+            return
+        index = event.list_view.index
+        if index is None or index < 0 or index >= len(self._note_list_keys):
+            return
+        self._select_note(self._note_list_keys[index], focus_editor=True)
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id != "notes_editor":
+            return
+        if self._notes_save_timer is not None:
+            self._notes_save_timer.stop()
+        self._notes_save_timer = self.set_timer(1.5, self._debounced_save_note)
+
+    def _debounced_save_note(self) -> None:
+        self._notes_save_timer = None
+        self._save_active_note(persist=True)
 
     def _focus_positions_table(self) -> None:
         if self._active_tab() != "positions" or not self.positions:
@@ -850,6 +1000,10 @@ class PortfolioTrackerApp(App[None]):
 
     def action_tab_allocation(self) -> None:
         self._set_tab("allocation")
+
+    def action_tab_notes(self) -> None:
+        self._set_tab("notes")
+        self.call_after_refresh(self._focus_notes_list)
 
     def action_refresh_now(self) -> None:
         if self._status_prompt_blocks("refresh"):
@@ -1177,6 +1331,7 @@ class PortfolioTrackerApp(App[None]):
         if self.positions:
             self.call_after_refresh(self._focus_positions_table)
         self._render_allocation_view()
+        self._populate_notes_list()
         self.show_status(f"removed {ticker}", level="success")
 
     async def _upsert_position(self, payload: dict[str, str], edit_index: Optional[int]) -> None:
@@ -1238,10 +1393,16 @@ class PortfolioTrackerApp(App[None]):
 
         self.positions.sort(key=lambda item: item.ticker)
         self._save_portfolio()
+        self._populate_notes_list()
         self._trigger_refresh(force=True, reason="position change")
 
     def action_save_portfolio(self) -> None:
         if self._status_prompt_blocks("save"):
+            return
+        if self._active_tab() == "notes":
+            self._save_active_note(persist=False)
+            self._save_portfolio()
+            self.show_status("notes saved", level="success")
             return
         if self._active_tab() != "positions":
             return
@@ -1250,7 +1411,13 @@ class PortfolioTrackerApp(App[None]):
 
     def _save_portfolio(self) -> None:
         try:
-            save_data(DATA_FILE, self.positions, self.viewer_ticker, self.viewer_timeframe)
+            save_data(
+                DATA_FILE,
+                self.positions,
+                self.viewer_ticker,
+                self.viewer_timeframe,
+                self.notes,
+            )
         except OSError as exc:
             self.show_status(f"save failed: {exc}", level="error")
 
@@ -1264,7 +1431,7 @@ class PortfolioTrackerApp(App[None]):
             self._cancel_status_prompt()
             return
         focused = self.focused
-        if isinstance(focused, Input):
+        if isinstance(focused, (Input, TextArea)):
             self.set_focus(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -1283,7 +1450,7 @@ class PortfolioTrackerApp(App[None]):
     def _viewer_timeframe_keys_active(self) -> bool:
         if self._active_tab() != "viewer":
             return False
-        return not isinstance(self.focused, Input)
+        return not isinstance(self.focused, (Input, TextArea))
 
     def _update_timeframe_buttons(self) -> None:
         for timeframe in TIMEFRAME_OPTIONS:
